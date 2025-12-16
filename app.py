@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import re
@@ -130,12 +129,19 @@ def extrair_dados_universal(texto_copiado):
         
         saldo_devedor = 0.0
         parcela_teto = 0.0
+        prazo_final = 0 # Variável para armazenar o prazo
+        
         for pz_str, vlr_str in todas_parcelas:
             pz = int(pz_str)
             vlr = limpar_moeda(vlr_str)
             saldo_devedor += (pz * vlr)
-            if pz > 1 and vlr > parcela_teto: parcela_teto = vlr
-            elif len(todas_parcelas) == 1: parcela_teto = vlr
+            # Lógica para pegar a maior parcela e seu prazo
+            if pz > 1 and vlr > parcela_teto: 
+                parcela_teto = vlr
+                prazo_final = pz
+            elif len(todas_parcelas) == 1: 
+                parcela_teto = vlr
+                prazo_final = pz
 
         if credito > 0 and entrada > 0:
             if saldo_devedor == 0: saldo_devedor = (credito * 1.3) - entrada
@@ -144,7 +150,8 @@ def extrair_dados_universal(texto_copiado):
                 lista_cotas.append({
                     'ID': id_cota, 'Admin': admin_encontrada, 'Tipo': tipo_cota,
                     'Crédito': credito, 'Entrada': entrada,
-                    'Parcela': parcela_teto, 'Saldo': saldo_devedor, 'CustoTotal': custo_total,
+                    'Parcela': parcela_teto, 'Prazo': prazo_final, 'Saldo': saldo_devedor, 
+                    'CustoTotal': custo_total,
                     'EntradaPct': (entrada/credito) if credito else 0
                 })
                 id_cota += 1
@@ -189,14 +196,23 @@ def processar_combinacoes(cotas, min_cred, max_cred, max_ent, max_parc, max_cust
                     if soma_cred < min_cred or soma_cred > max_cred: continue
                     soma_parc = sum(c['Parcela'] for c in combo)
                     if soma_parc > (max_parc * 1.05): continue
-                    soma_custo = sum(c['CustoTotal'] for c in combo)
                     
                     # Cálculo Saldo Devedor
                     soma_saldo = sum(c['Saldo'] for c in combo)
-
-                    custo_real = (soma_custo / soma_cred) - 1
+                    
+                    # Custo Total: Entrada + Saldo
+                    custo_total_abs = soma_ent + soma_saldo
+                    
+                    # Custo Real %
+                    custo_real = (custo_total_abs / soma_cred) - 1
                     if custo_real > max_custo: continue
                     
+                    # % Entrada
+                    pct_entrada = (soma_ent / soma_cred) if soma_cred > 0 else 0
+                    
+                    # Prazos concatenados
+                    prazos_str = " + ".join([str(c['Prazo']) for c in combo])
+
                     ids = " + ".join([str(c['ID']) for c in combo])
                     detalhes = " || ".join([f"[ID {c['ID']}] {c['Tipo']} Cr: {c['Crédito']:,.0f}" for c in combo])
                     tipo_final = combo[0]['Tipo']
@@ -209,9 +225,13 @@ def processar_combinacoes(cotas, min_cred, max_cred, max_ent, max_parc, max_cust
                     
                     combinacoes_validas.append({
                         'Admin': admin, 'Status': status, 'Tipo': tipo_final, 'IDs': ids,
-                        'Crédito Total': soma_cred, 'Entrada Total': soma_ent,
-                        'Saldo Devedor': soma_saldo, # Nova Coluna
+                        'Crédito Total': soma_cred, 
+                        'Entrada Total': soma_ent,
+                        '% Entrada': pct_entrada * 100, # Nova Coluna
+                        'Saldo Devedor': soma_saldo,
+                        'Prazos': prazos_str, # Nova Coluna
                         'Parcela Total': soma_parc, 
+                        'Custo Total (R$)': custo_total_abs, # Nova Coluna
                         'Custo Real (%)': custo_real * 100, 
                         'Detalhes': detalhes
                     })
@@ -240,30 +260,34 @@ def limpar_emojis(texto):
 def gerar_pdf_final(df):
     pdf = PDF(orientation='L', unit='mm', format='A4')
     pdf.add_page()
-    pdf.set_font("Arial", size=8) # Fonte levemente menor para caber tudo
+    pdf.set_font("Arial", size=7) # Fonte reduzida para caber mais colunas
     pdf.set_fill_color(236, 236, 228)
     pdf.set_text_color(0)
-    pdf.set_font("Arial", 'B', 8)
+    pdf.set_font("Arial", 'B', 7)
     
-    # Adicionei "Saldo" no cabeçalho PDF
-    headers = ["Admin", "Status", "Credito", "Entrada", "Saldo Dev.", "Parcela", "Custo", "Detalhes"]
-    w = [25, 30, 30, 30, 30, 25, 15, 90] 
+    # Headers Atualizados
+    headers = ["Admin", "Status", "Credito", "Entrada", "% Ent", "Saldo Dev.", "Prazos", "Parcela", "Custo Tot", "Custo %", "Detalhes"]
+    # Larguras ajustadas (Total ~277mm)
+    w = [20, 22, 22, 22, 12, 22, 15, 20, 22, 12, 88] 
     
     for i, h in enumerate(headers): pdf.cell(w[i], 10, h, 1, 0, 'C', True)
     pdf.ln()
-    pdf.set_font("Arial", size=7)
+    pdf.set_font("Arial", size=6)
     
     for index, row in df.iterrows():
         status_clean = limpar_emojis(row['Status'])
         pdf.cell(w[0], 8, limpar_emojis(str(row['Admin'])), 1, 0, 'C')
         pdf.cell(w[1], 8, status_clean, 1, 0, 'C')
-        pdf.cell(w[2], 8, f"R$ {row['Crédito Total']:,.2f}", 1, 0, 'R')
-        pdf.cell(w[3], 8, f"R$ {row['Entrada Total']:,.2f}", 1, 0, 'R')
-        pdf.cell(w[4], 8, f"R$ {row['Saldo Devedor']:,.2f}", 1, 0, 'R') # Saldo no PDF
-        pdf.cell(w[5], 8, f"R$ {row['Parcela Total']:,.2f}", 1, 0, 'R')
-        pdf.cell(w[6], 8, f"{row['Custo Real (%)']:.2f}%", 1, 0, 'C')
+        pdf.cell(w[2], 8, f"{row['Crédito Total']:,.0f}", 1, 0, 'R')
+        pdf.cell(w[3], 8, f"{row['Entrada Total']:,.0f}", 1, 0, 'R')
+        pdf.cell(w[4], 8, f"{row['% Entrada']:.1f}%", 1, 0, 'C') # Nova Coluna PDF
+        pdf.cell(w[5], 8, f"{row['Saldo Devedor']:,.0f}", 1, 0, 'R')
+        pdf.cell(w[6], 8, str(row['Prazos']), 1, 0, 'C') # Nova Coluna PDF
+        pdf.cell(w[7], 8, f"{row['Parcela Total']:,.0f}", 1, 0, 'R')
+        pdf.cell(w[8], 8, f"{row['Custo Total (R$)']:,.0f}", 1, 0, 'R') # Nova Coluna PDF
+        pdf.cell(w[9], 8, f"{row['Custo Real (%)']:.2f}%", 1, 0, 'C')
         detalhe = limpar_emojis(row['Detalhes'])
-        pdf.cell(w[7], 8, detalhe[:65], 1, 1, 'L')
+        pdf.cell(w[10], 8, detalhe[:75], 1, 1, 'L')
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
 # --- APP ---
@@ -303,8 +327,10 @@ if st.session_state.df_resultado is not None:
             column_config={
                 "Crédito Total": st.column_config.NumberColumn(format="R$ %.2f"),
                 "Entrada Total": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Saldo Devedor": st.column_config.NumberColumn(format="R$ %.2f"), # Nova Coluna
+                "% Entrada": st.column_config.NumberColumn(format="%.2f %%"), # Formato Visual
+                "Saldo Devedor": st.column_config.NumberColumn(format="R$ %.2f"),
                 "Parcela Total": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Custo Total (R$)": st.column_config.NumberColumn(format="R$ %.2f"), # Formato Visual
                 "Custo Real (%)": st.column_config.NumberColumn(format="%.2f %%"),
             }, hide_index=True
         )
@@ -319,15 +345,26 @@ if st.session_state.df_resultado is not None:
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
             df_ex = df_show.copy()
+            # Ajuste de % para decimal no Excel
             df_ex['Custo Real (%)'] = df_ex['Custo Real (%)'] / 100
+            df_ex['% Entrada'] = df_ex['% Entrada'] / 100
+            
             df_ex.to_excel(writer, index=False, sheet_name='JBS')
             wb = writer.book
             ws = writer.sheets['JBS']
             fmt_money = wb.add_format({'num_format': 'R$ #,##0.00'})
             fmt_perc = wb.add_format({'num_format': '0.00%'})
-            ws.set_column('C:G', 18, fmt_money) # Crédito, Entrada, Saldo, Parcela
-            ws.set_column('H:H', 12, fmt_perc)
-            ws.set_column('A:C', 15)
+            
+            # Formatação Excel
+            ws.set_column('A:B', 15) # Admin, Status
+            ws.set_column('C:D', 18, fmt_money) # Cred, Ent
+            ws.set_column('E:E', 12, fmt_perc)  # % Ent
+            ws.set_column('F:F', 18, fmt_money) # Saldo
+            ws.set_column('G:G', 12)            # Prazos (Texto)
+            ws.set_column('H:H', 18, fmt_money) # Parcela
+            ws.set_column('I:I', 18, fmt_money) # Custo Total
+            ws.set_column('J:J', 12, fmt_perc)  # Custo %
+            
         c_xls.download_button("📊 Baixar Excel", buf.getvalue(), "JBS_Calculo.xlsx")
     else:
         st.warning("Nenhuma oportunidade com estes filtros.")
