@@ -85,7 +85,10 @@ def limpar_moeda(texto):
 def extrair_dados_universal(texto_copiado):
     lista_cotas = []
     texto_limpo = "\n".join([line.strip() for line in texto_copiado.split('\n') if line.strip()])
-    blocos = re.split(r'(?i)(?=imóvel|imovel|automóvel|automovel|veículo|caminhão|moto)', texto_limpo)
+    
+    # ATUALIZAÇÃO: Adicionado 'directions' e 'selecionar' para pegar o padrão iContemplados
+    blocos = re.split(r'(?i)(?=imóvel|imovel|automóvel|automovel|veículo|caminhão|moto|directions|selecionar)', texto_limpo)
+    
     if len(blocos) < 2: blocos = texto_limpo.split('\n\n')
 
     id_cota = 1
@@ -93,6 +96,7 @@ def extrair_dados_universal(texto_copiado):
         if len(bloco) < 20: continue
         bloco_lower = bloco.lower()
         
+        # Identificação de Administradora
         admins = ['BRADESCO', 'SANTANDER', 'ITAÚ', 'ITAU', 'PORTO', 'CAIXA', 'BANCO DO BRASIL', 'BB', 'RODOBENS', 'EMBRACON', 'ANCORA', 'ÂNCORA', 'MYCON', 'SICREDI', 'SICOOB', 'MAPFRE', 'HS', 'YAMAHA', 'ZEMA', 'BANCORBRÁS', 'BANCORBRAS', 'SERVOPA']
         admin_encontrada = "OUTROS"
         for adm in admins:
@@ -100,42 +104,61 @@ def extrair_dados_universal(texto_copiado):
                 admin_encontrada = adm.upper()
                 break
         
+        # Ignora blocos sem admin ou sem valores (exceto se for admin reconhecida)
         if admin_encontrada == "OUTROS" and "r$" not in bloco_lower: continue
 
+        # Tipo de Cota
         tipo_cota = "Geral"
         if "imóvel" in bloco_lower or "imovel" in bloco_lower: tipo_cota = "Imóvel"
         elif "automóvel" in bloco_lower or "automovel" in bloco_lower or "veículo" in bloco_lower or "carro" in bloco_lower: tipo_cota = "Automóvel"
         elif "caminhão" in bloco_lower or "pesado" in bloco_lower: tipo_cota = "Pesados"
-        elif "moto" in bloco_lower: tipo_cota = "Automóvel"
+        elif "moto" in bloco_lower: tipo_cota = "Automóvel" # Motos tratadas como auto/geral
+        elif "directions_car" in bloco_lower: tipo_cota = "Automóvel" # Específico iContemplados
 
+        # Extração de Crédito
         credito = 0.0
+        # Padrão 1: Rótulo na mesma linha
         match_cred = re.search(r'(?:crédito|credito|bem|valor)[^\d\n]*?R\$\s?([\d\.,]+)', bloco_lower)
-        if match_cred: credito = limpar_moeda(match_cred.group(1))
+        if match_cred: 
+            credito = limpar_moeda(match_cred.group(1))
         else:
+            # Fallback (Pega o maior valor do bloco, comum no iContemplados onde o crédito vem solto)
             valores = re.findall(r'R\$\s?([\d\.,]+)', bloco)
             vals = sorted([limpar_moeda(v) for v in valores], reverse=True)
             if vals: credito = vals[0]
 
+        # Extração de Entrada
         entrada = 0.0
+        # Padrão 1: Rótulo na mesma linha
         match_ent = re.search(r'(?:entrada|ágio|agio|quero|pago)[^\d\n]*?R\$\s?([\d\.,]+)', bloco_lower)
-        if match_ent: entrada = limpar_moeda(match_ent.group(1))
+        if match_ent: 
+            entrada = limpar_moeda(match_ent.group(1))
         else:
-            valores = re.findall(r'R\$\s?([\d\.,]+)', bloco)
-            vals = sorted([limpar_moeda(v) for v in valores], reverse=True)
-            if len(vals) > 1: entrada = vals[1]
+            # Padrão 2 (iContemplados): Rótulo, quebra de linha, valor
+            match_ent_break = re.search(r'(?:entrada|ágio|agio).*?R\$\s?([\d\.,]+)', bloco_lower, re.DOTALL)
+            if match_ent_break:
+                 # Verificação simples para não pegar valor longe demais
+                 if len(match_ent_break.group(0)) < 50: 
+                    entrada = limpar_moeda(match_ent_break.group(1))
+            
+            if entrada == 0:
+                # Fallback: Segundo maior valor do bloco
+                valores = re.findall(r'R\$\s?([\d\.,]+)', bloco)
+                vals = sorted([limpar_moeda(v) for v in valores], reverse=True)
+                if len(vals) > 1: entrada = vals[1]
 
+        # Extração de Parcelas
         regex_parc = r'(\d+)\s*[xX]\s*R?\$\s?([\d\.,]+)'
         todas_parcelas = re.findall(regex_parc, bloco)
         
         saldo_devedor = 0.0
         parcela_teto = 0.0
-        prazo_final = 0 # Variável para armazenar o prazo
+        prazo_final = 0
         
         for pz_str, vlr_str in todas_parcelas:
             pz = int(pz_str)
             vlr = limpar_moeda(vlr_str)
             saldo_devedor += (pz * vlr)
-            # Lógica para pegar a maior parcela e seu prazo
             if pz > 1 and vlr > parcela_teto: 
                 parcela_teto = vlr
                 prazo_final = pz
@@ -197,22 +220,13 @@ def processar_combinacoes(cotas, min_cred, max_cred, max_ent, max_parc, max_cust
                     soma_parc = sum(c['Parcela'] for c in combo)
                     if soma_parc > (max_parc * 1.05): continue
                     
-                    # Cálculo Saldo Devedor
                     soma_saldo = sum(c['Saldo'] for c in combo)
-                    
-                    # Custo Total: Entrada + Saldo
                     custo_total_abs = soma_ent + soma_saldo
-                    
-                    # Custo Real %
                     custo_real = (custo_total_abs / soma_cred) - 1
                     if custo_real > max_custo: continue
                     
-                    # % Entrada
                     pct_entrada = (soma_ent / soma_cred) if soma_cred > 0 else 0
-                    
-                    # Prazos concatenados
                     prazos_str = " + ".join([str(c['Prazo']) for c in combo])
-
                     ids = " + ".join([str(c['ID']) for c in combo])
                     detalhes = " || ".join([f"[ID {c['ID']}] {c['Tipo']} Cr: {c['Crédito']:,.0f}" for c in combo])
                     tipo_final = combo[0]['Tipo']
@@ -227,144 +241,3 @@ def processar_combinacoes(cotas, min_cred, max_cred, max_ent, max_parc, max_cust
                         'Admin': admin, 'Status': status, 'Tipo': tipo_final, 'IDs': ids,
                         'Crédito Total': soma_cred, 
                         'Entrada Total': soma_ent,
-                        '% Entrada': pct_entrada * 100, # Nova Coluna
-                        'Saldo Devedor': soma_saldo,
-                        'Prazos': prazos_str, # Nova Coluna
-                        'Parcela Total': soma_parc, 
-                        'Custo Total (R$)': custo_total_abs, # Nova Coluna
-                        'Custo Real (%)': custo_real * 100, 
-                        'Detalhes': detalhes
-                    })
-                    if len([x for x in combinacoes_validas if x['Admin'] == admin]) > 150: break
-                except StopIteration: break
-            if count > max_ops: break
-    progress_bar.empty()
-    return pd.DataFrame(combinacoes_validas)
-
-# --- PDF ---
-class PDF(FPDF):
-    def header(self):
-        self.set_fill_color(132, 117, 78)
-        self.rect(0, 0, 297, 22, 'F')
-        if os.path.exists("logo_pdf.png"):
-            self.image('logo_pdf.png', 5, 3, 35)
-        self.set_font('Arial', 'B', 16)
-        self.set_text_color(255, 255, 255)
-        self.set_xy(45, 6) 
-        self.cell(0, 10, 'RELATÓRIO SNIPER DE OPORTUNIDADES', 0, 1, 'L')
-        self.ln(8)
-
-def limpar_emojis(texto):
-    return texto.encode('latin-1', 'ignore').decode('latin-1').replace("?", "").strip()
-
-def gerar_pdf_final(df):
-    pdf = PDF(orientation='L', unit='mm', format='A4')
-    pdf.add_page()
-    pdf.set_font("Arial", size=7) # Fonte reduzida para caber mais colunas
-    pdf.set_fill_color(236, 236, 228)
-    pdf.set_text_color(0)
-    pdf.set_font("Arial", 'B', 7)
-    
-    # Headers Atualizados
-    headers = ["Admin", "Status", "Credito", "Entrada", "% Ent", "Saldo Dev.", "Prazos", "Parcela", "Custo Tot", "Custo %", "Detalhes"]
-    # Larguras ajustadas (Total ~277mm)
-    w = [20, 22, 22, 22, 12, 22, 15, 20, 22, 12, 88] 
-    
-    for i, h in enumerate(headers): pdf.cell(w[i], 10, h, 1, 0, 'C', True)
-    pdf.ln()
-    pdf.set_font("Arial", size=6)
-    
-    for index, row in df.iterrows():
-        status_clean = limpar_emojis(row['Status'])
-        pdf.cell(w[0], 8, limpar_emojis(str(row['Admin'])), 1, 0, 'C')
-        pdf.cell(w[1], 8, status_clean, 1, 0, 'C')
-        pdf.cell(w[2], 8, f"{row['Crédito Total']:,.0f}", 1, 0, 'R')
-        pdf.cell(w[3], 8, f"{row['Entrada Total']:,.0f}", 1, 0, 'R')
-        pdf.cell(w[4], 8, f"{row['% Entrada']:.1f}%", 1, 0, 'C') # Nova Coluna PDF
-        pdf.cell(w[5], 8, f"{row['Saldo Devedor']:,.0f}", 1, 0, 'R')
-        pdf.cell(w[6], 8, str(row['Prazos']), 1, 0, 'C') # Nova Coluna PDF
-        pdf.cell(w[7], 8, f"{row['Parcela Total']:,.0f}", 1, 0, 'R')
-        pdf.cell(w[8], 8, f"{row['Custo Total (R$)']:,.0f}", 1, 0, 'R') # Nova Coluna PDF
-        pdf.cell(w[9], 8, f"{row['Custo Real (%)']:.2f}%", 1, 0, 'C')
-        detalhe = limpar_emojis(row['Detalhes'])
-        pdf.cell(w[10], 8, detalhe[:75], 1, 1, 'L')
-    return pdf.output(dest='S').encode('latin-1', 'replace')
-
-# --- APP ---
-if 'df_resultado' not in st.session_state: st.session_state.df_resultado = None
-
-with st.expander("📋 DADOS DO SITE (Colar aqui)", expanded=True):
-    texto_site = st.text_area("", height=100, key="input_texto")
-
-st.subheader("Filtros JBS")
-tipo_bem = st.selectbox("Tipo de Bem", ["Todos", "Imóvel", "Automóvel", "Pesados"])
-
-c1, c2 = st.columns(2)
-min_c = c1.number_input("Crédito Mín (R$)", 0.0, step=1000.0, value=60000.0, format="%.2f")
-max_c = c1.number_input("Crédito Máx (R$)", 0.0, step=1000.0, value=710000.0, format="%.2f")
-max_e = c2.number_input("Entrada Máx (R$)", 0.0, step=1000.0, value=20000.0, format="%.2f")
-max_p = c2.number_input("Parcela Máx (R$)", 0.0, step=100.0, value=2000.0, format="%.2f")
-max_k = st.slider("Custo Máx (%)", 0.0, 1.0, 0.55, 0.01)
-
-if st.button("🔍 LOCALIZAR OPORTUNIDADES"):
-    if texto_site:
-        cotas = extrair_dados_universal(texto_site)
-        if cotas:
-            st.session_state.df_resultado = processar_combinacoes(cotas, min_c, max_c, max_e, max_p, max_k, tipo_bem)
-        else:
-            st.error("Nenhuma cota lida.")
-    else:
-        st.error("Cole os dados.")
-
-if st.session_state.df_resultado is not None:
-    df_show = st.session_state.df_resultado
-    if not df_show.empty:
-        df_show = df_show.sort_values(by='Custo Real (%)')
-        st.success(f"{len(df_show)} Oportunidades Encontradas!")
-        
-        st.dataframe(
-            df_show,
-            column_config={
-                "Crédito Total": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Entrada Total": st.column_config.NumberColumn(format="R$ %.2f"),
-                "% Entrada": st.column_config.NumberColumn(format="%.2f %%"), # Formato Visual
-                "Saldo Devedor": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Parcela Total": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Custo Total (R$)": st.column_config.NumberColumn(format="R$ %.2f"), # Formato Visual
-                "Custo Real (%)": st.column_config.NumberColumn(format="%.2f %%"),
-            }, hide_index=True
-        )
-        
-        c_pdf, c_xls = st.columns(2)
-        
-        try:
-            pdf_bytes = gerar_pdf_final(df_show)
-            c_pdf.download_button("📄 Baixar PDF", pdf_bytes, "JBS_Relatorio.pdf", "application/pdf")
-        except: c_pdf.error("Erro PDF")
-
-        buf = BytesIO()
-        with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-            df_ex = df_show.copy()
-            # Ajuste de % para decimal no Excel
-            df_ex['Custo Real (%)'] = df_ex['Custo Real (%)'] / 100
-            df_ex['% Entrada'] = df_ex['% Entrada'] / 100
-            
-            df_ex.to_excel(writer, index=False, sheet_name='JBS')
-            wb = writer.book
-            ws = writer.sheets['JBS']
-            fmt_money = wb.add_format({'num_format': 'R$ #,##0.00'})
-            fmt_perc = wb.add_format({'num_format': '0.00%'})
-            
-            # Formatação Excel
-            ws.set_column('A:B', 15) # Admin, Status
-            ws.set_column('C:D', 18, fmt_money) # Cred, Ent
-            ws.set_column('E:E', 12, fmt_perc)  # % Ent
-            ws.set_column('F:F', 18, fmt_money) # Saldo
-            ws.set_column('G:G', 12)            # Prazos (Texto)
-            ws.set_column('H:H', 18, fmt_money) # Parcela
-            ws.set_column('I:I', 18, fmt_money) # Custo Total
-            ws.set_column('J:J', 12, fmt_perc)  # Custo %
-            
-        c_xls.download_button("📊 Baixar Excel", buf.getvalue(), "JBS_Calculo.xlsx")
-    else:
-        st.warning("Nenhuma oportunidade com estes filtros.")
